@@ -1,0 +1,209 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"] # Triggers on new tags like v1.0, v1.0.1, etc.
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: # Allows manual triggering from the GitHub Actions tab
+
+env:
+  UV_SYSTEM_PYTHON: 1 # Ensures uv uses the system Python installed by setup-python
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: repo-sync-linux
+            archive_ext: .tar.gz
+          - os: windows-latest
+            asset_name: repo-sync-windows
+            archive_ext: .zip
+          - os: macos-latest
+            asset_name: repo-sync-macos
+            archive_ext: .tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true # Caches uv's own installation and dependencies
+
+      - name: Install Python and dependencies
+        run: |
+          uv python install # Ensures a Python environment is available for uv to manage
+          uv sync --frozen  # Installs dependencies as specified in uv.lock, ensuring reproducibility
+
+      # --- Build Sync Tool ---
+      - name: Build Sync Tool executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv run pyinstaller `
+            --onefile `
+            --name repo-sync `
+            --add-data="config:config" `
+            --hidden-import=dotenv `
+            --hidden-import=requests `
+            --hidden-import=base64 `
+            sync_repos.py
+        shell: pwsh # Use PowerShell for Windows for multiline commands
+
+      - name: Build Sync Tool executable (Non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          uv run pyinstaller \
+            --onefile \
+            --name repo-sync \
+            --add-data="config:config" \
+            --hidden-import=dotenv \
+            --hidden-import=requests \
+            --hidden-import=base64 \
+            sync_repos.py
+
+      # --- Build Cleanup Tool ---
+      # It's good practice to build both tools if they are part of the same release package
+      - name: Build Cleanup Tool executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv run pyinstaller `
+            --onefile `
+            --name repo-cleanup `
+            --add-data="config:config" `
+            --hidden-import=dotenv `
+            --hidden-import=requests `
+            cleanup_tool.py
+        shell: pwsh
+
+      - name: Build Cleanup Tool executable (Non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          uv run pyinstaller \
+            --onefile \
+            --name repo-cleanup \
+            --add-data="config:config" \
+            --hidden-import=dotenv \
+            --hidden-import=requests \
+            cleanup_tool.py
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          # Create the directory for the specific OS package
+          mkdir -p ${{ matrix.asset_name }}
+
+          # Copy executables based on OS
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp dist/repo-sync.exe ${{ matrix.asset_name }}/
+            cp dist/repo-cleanup.exe ${{ matrix.asset_name }}/ # Copy cleanup tool
+          else
+            cp dist/repo-sync ${{ matrix.asset_name }}/
+            cp dist/repo-cleanup ${{ matrix.asset_name }}/ # Copy cleanup tool
+          fi
+
+          # Copy configuration and project files
+          cp -r config ${{ matrix.asset_name }}/
+          cp config/.env.example ${{ matrix.asset_name }}/config/ # Always copy example
+          cp README.md ${{ matrix.asset_name }}/
+          cp LICENSE ${{ matrix.asset_name }}/ # Include license in the package
+
+      - name: Create archive
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            powershell Compress-Archive -Path ${{ matrix.asset_name }} -DestinationPath ${{ matrix.asset_name }}${{ matrix.archive_ext }}
+          else
+            tar -czf ${{ matrix.asset_name }}${{ matrix.archive_ext }} ${{ matrix.asset_name }}/
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }} # Name of the artifact for download later
+          path: ${{ matrix.asset_name }}${{ matrix.archive_ext }} # Path to the created archive
+          retention-days: 30 # How long to keep the artifact on GitHub
+
+  release:
+    name: Create GitHub Release
+    needs: build # This job depends on the 'build' job completing successfully
+    # Only run this job for push events on main/master or new tags
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (contains(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write # Grant permission to write to repository contents (for creating the release)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true # Downloads all artifacts from 'build' job into a single directory
+
+      - name: Get version tag or default to 'latest'
+        id: version
+        run: |
+          # If a tag triggered the workflow, use the tag name as version
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Otherwise (e.g., push to main/master), use 'latest'
+            VERSION="latest"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Format current release date
+        id: format_date
+        # Use 'date' command directly to get the current timestamp of the workflow run
+        run: echo "formatted_date=$(TZ='Asia/Taipei' date '+%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      # This step is good for cleaning up previous 'latest' releases if you only want one,
+      # or for re-publishing a specific tag without creating duplicates.
+      - name: Delete previous 'latest' release (if exists)
+        # Only attempt to delete if the version is 'latest' and it's a push to main/master
+        if: steps.version.outputs.version == 'latest' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: dev-drprasad/delete-tag-and-release@v1.1
+        with:
+          tag_name: latest # Target the 'latest' tag for deletion
+          delete_release: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true # Don't fail the workflow if 'latest' tag/release doesn't exist
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }} # Use the determined version
+          name: Repo Sync with Azure ${{ steps.version.outputs.version }} # Name of the release on GitHub
+          body: |
+            ## Repo Sync & Cleanup Tool ${{ steps.version.outputs.version }}
+
+            Cross-platform executables for managing Sonatype IQ Server applications by synchronizing with Azure DevOps repositories.
+
+            **Release Date:** ${{ steps.format_date.outputs.formatted_date }}
+            **Downloads:**
+            - Windows: `repo-sync-windows.zip`
+            - macOS: `repo-sync-macos.tar.gz`
+            - Linux: `repo-sync-linux.tar.gz`
+
+            **Quick Start:**
+            1. Download and extract the appropriate archive for your platform.
+            2. In the `config/` directory, create a `.env` file based on `.env.example` and fill in your credentials.
+            3. Verify/configure organization settings in `config/org-azure.json`.
+            4. Run the Sync Tool: `./repo-sync` (Linux/macOS) or `repo-sync.exe` (Windows).
+            5. (Optional) Run the Cleanup Tool: `./repo-cleanup` (Linux/macOS) or `repo-cleanup.exe` (Windows) - **Use with extreme caution!**
+
+            No Python installation required to run the tools.
+          # Dynamically attach all archives built in the 'build' job
+          files: |
+            repo-sync-windows.zip
+            repo-sync-macos.tar.gz
+            repo-sync-linux.tar.gz
+          draft: false # Publish release immediately
+          prerelease: false # Not a pre-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

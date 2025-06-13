@@ -75,3 +75,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+main
+debug-org.json
