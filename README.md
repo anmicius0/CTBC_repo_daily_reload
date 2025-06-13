@@ -1,131 +1,106 @@
-# GitHub to IQ Server Sync Tool
+# Nexus Manager
 
-Automatically synchronizes GitHub repositories with Sonatype IQ Server - creates applications, adds SCM connections, and triggers security scans.
+## 📝 Overview
 
-## Quick Start
+Nexus Manager is a cross-platform tool for managing Nexus Repository and IQ Server, providing both a web interface and a CLI. It is distributed as a standalone executable for Windows, macOS, and Linux.
+This means you do not need Python or `uv` installed to run the downloaded application.
 
-1. **Install dependencies:**
+---
 
-```bash
-pip install -r requirements.txt
-```
+## 📦 Using the Release Executable
 
-2. **Configure environment:**
+### 1. Download & Extract
 
-```bash
-cp .env.example .env
-# Edit .env with your credentials
-```
+- Download the appropriate archive for your platform from the release page.
+- Extract the archive. You will get a folder containing:
+  - The executable (`nexus-manager` or `nexus-manager.exe`)
+  - `config/` (configuration files)
+  - `templates/` (web UI templates)
+  - `pyproject.toml`
+  - `README.md`
+The `pyproject.toml` file is included for development purposes; `uv` is used for building the executable and managing dependencies if you plan to modify the code, but it's not needed to run the pre-compiled application.
 
-3. **Run:**
+### 2. Configure Environment
 
-```bash
-python main.py
-```
+- Copy `config/.env.example` to `config/.env` and fill in your server details and secrets.
 
-## Configuration
+### 3. Run the Application
 
-### Required Environment Variables
+- **Web UI:**
+  - On Linux/macOS: `./nexus-manager`
+  - On Windows: `nexus-manager.exe`
+- **CLI:**
+  - On Linux/macOS: `./nexus-manager cli`
+  - On Windows: `nexus-manager.exe cli`
 
-```bash
-GITHUB_TOKEN=your_github_token
-IQ_SERVER_URL=https://your-iq-server.com
-IQ_USERNAME=your_username
-IQ_PASSWORD=your_password
-ORGANIZATION_ID=your_org_id
-REPOSITORY_SEARCH_TERM=your_search_term    # Search term for repos
-```
+---
 
-### Optional Settings
+## 🎨 Customization
 
-```bash
-DEFAULT_BRANCH=main               # Default branch name
-STAGE_ID=source                   # IQ scan stage
-```
+### Configuration
 
-## Customization
+- All configuration is in the `config/` directory.
+- Edit `config/.env` for environment variables (see `.env.example` for options).
+- Edit `config/organisations.json` and `config/package_manager_config.json` for organization and package manager settings.
 
-### Search Criteria
+### Web Templates
 
-Modify search term in `.env`:
+- The web UI uses Jinja2 templates in the `templates/` directory.
+- Customize `index.html` and `result.html` as needed.
 
-```bash
-REPOSITORY_SEARCH_TERM=myproject  # Find repos with "myproject" in name
-```
+---
 
-### Repository Filtering
+## 🛠️ Codebase Maintenance
 
-Edit `get_repositories()` in `main.py` to add custom filters:
+### ⚙️ Setting Up a Development Environment
 
-```python
-def get_repositories(self):
-    # Add custom filtering logic here
-    search_results = self.github.search_repositories(
-        query=f"{self.config['SEARCH_TERM']} in:name user:{user.login}"
-    )
-    # Filter results as needed
-    return filtered_repos
-```
+- 1. Install [uv](https://github.com/astral-sh/uv) if you haven't already.
+- 2. Clone this repository.
+- 3. Navigate to the repository directory.
+- 4. Create a virtual environment: `uv venv`
+- 5. Activate the virtual environment: `source .venv/bin/activate` (Linux/macOS) or `.venv\Scripts\activate` (Windows).
+- 6. Install dependencies: `uv pip install -e .[dev]` (Install in editable mode with development extras. Adjust if your project uses a different way to specify extras or if there are no dev extras).
 
-### IQ Server Settings
+### Structure
 
-Configure scan behavior:
+- `nexus_manager.py`: Main entry point.
+- `nexus_manager/`: Core logic and utilities.
+  - `core.py`: Main business logic.
+  - `utils.py`: Helper functions.
+  - `error_handler.py`: Error handling.
+- `config/`: Configuration files.
+- `templates/`: Web UI templates.
 
-```bash
-STAGE_ID=build     # Change scan stage
-DEFAULT_BRANCH=dev # Use different default branch
-```
+### Adding Features
 
-## Maintenance
+- Add new logic in `nexus_manager/` as needed.
+- Register new CLI commands or web routes in `nexus_manager.py` or `core.py`.
+- Update templates for UI changes.
 
-### Key Components
+### 📦 Dependency Management with uv
 
-- **`get_config()`**: Environment variable loading
-- **`IQServerClient`**: IQ Server API interactions
-- **`GitHubRepoSync`**: Main sync orchestration
+- Dependencies are managed with [uv](https://github.com/astral-sh/uv) and listed in `pyproject.toml`.
+- To add a dependency: `uv pip install <package>`
+  - `pyproject.toml` may need manual editing for version constraints or extras.
+- To remove a dependency: `uv pip uninstall <package>`
+- After modifying dependencies, `uv` will automatically update `uv.lock` if you run an install or sync command. Commit both `pyproject.toml` and `uv.lock`.
 
-### Common Tasks
+### 🏗️ Building the Executable with uv
 
-**Add new environment variables:**
+- Builds are automated via GitHub Actions.
+- To build locally:
+  1. Ensure you have [uv](https://github.com/astral-sh/uv) and [pyinstaller](https://pyinstaller.org/) installed in your environment (e.g., `uv pip install pyinstaller`).
+  2. Run the build command as in `.github/workflows/build-release.yml`. The workflow file might contain specific `uv` commands for building.
 
-```python
-# In get_config()
-config = {
-    # ...existing...
-    "NEW_SETTING": os.getenv("NEW_SETTING", "default"),
-}
-```
+---
 
-**Modify repository search:**
+## 💬 Support
 
-```python
-# In get_repositories()
-search_results = self.github.search_repositories(
-    query=f"your_custom_query"
-)
-```
+- For issues, open a GitHub issue in this repository.
+- For configuration help, see comments in `config/.env.example`.
 
-**Add error handling:**
+---
 
-```python
-try:
-    # API call
-except Exception as e:
-    print(f"Error: {e}")
-    errors += 1
-```
+## 📄 License
 
-### Troubleshooting
-
-- **Auth issues**: Verify GitHub token permissions and IQ Server credentials
-- **Rate limits**: GitHub allows 5000 requests/hour for authenticated users
-- **Network errors**: Check IQ Server URL and network connectivity
-
-### Logging
-
-Enable debug mode by setting:
-
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
+See `LICENSE` file (if present) for license information.
