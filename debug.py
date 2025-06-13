@@ -6,13 +6,29 @@ WARNING: This will permanently delete all applications in the specified organiza
 
 import requests
 import logging
+import json
+import os
 from typing import List, Dict
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def load_org_configs():
+    """Load organization configurations from org-github.json"""
+    try:
+        with open("org-github.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError("org-github.json file not found")
+    except json.JSONDecodeError:
+        raise ValueError("Invalid JSON format in org-github.json")
 
 
 class IQServerClient:
@@ -69,29 +85,25 @@ class IQServerClient:
 
 
 def remove_all_applications(
-    org_id: str, iq_url: str, iq_username: str, iq_password: str
+    org_id: str, org_name: str, iq_url: str, iq_username: str, iq_password: str
 ):
     """Remove all applications from the specified organization"""
 
     client = IQServerClient(iq_url, iq_username, iq_password)
 
     try:
-        # Verify organization exists
-        org = client.get_organization_by_id(org_id)
-        logger.info(f"Organization found: {org['name']} (ID: {org_id})")
+        logger.info(f"Processing organization: {org_name} (ID: {org_id})")
 
         # Get all applications
         applications = client.get_applications(org_id)
 
         if not applications:
             logger.info("No applications found in the organization")
-            return
+            return {"deleted": 0, "failed": 0}
 
         logger.info(f"Found {len(applications)} applications to delete:")
         for app in applications:
             logger.info(f"  - {app['name']} (ID: {app['id']})")
-
-        # Proceed to delete all applications without confirmation
 
         # Delete applications
         deleted_count = 0
@@ -110,36 +122,80 @@ def remove_all_applications(
                 logger.error(f"✗ Failed to delete: {app_name}")
                 failed_count += 1
 
-        logger.info(f"\nDeletion completed:")
+        logger.info(f"\nDeletion completed for {org_name}:")
         logger.info(f"  Successfully deleted: {deleted_count}")
-        logger.info(f"  Failed to delete: {failed_count}")
+        logger.info(f"  Failed to delete: {failed_count}\n")
+
+        return {"deleted": deleted_count, "failed": failed_count}
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
             logger.error(f"Organization with ID '{org_id}' not found")
         else:
             logger.error(f"Error accessing organization: {e}")
+        return {"deleted": 0, "failed": 0}
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
+        return {"deleted": 0, "failed": 0}
 
 
 def main():
     """Main function"""
-    # Configuration
-    IQ_SERVER_URL = "http://35.208.159.14:8070/"
-    IQ_USERNAME = "AdnkEJc8"
-    IQ_PASSWORD = "73BNKBGtgt629tEiYP0HyiXxAiLUmRdsrelw0WfM5rVx"
-    ORGANIZATION_ID = "a2290a50f45b46b7b5f6df617d5ecf03"
+    # Configuration from environment variables
+    IQ_SERVER_URL = os.getenv("IQ_SERVER_URL")
+    IQ_USERNAME = os.getenv("IQ_USERNAME")
+    IQ_PASSWORD = os.getenv("IQ_PASSWORD")
+
+    if not all([IQ_SERVER_URL, IQ_USERNAME, IQ_PASSWORD]):
+        logger.error(
+            "Missing required environment variables: IQ_SERVER_URL, IQ_USERNAME, IQ_PASSWORD"
+        )
+        return
+
+    # Type check - these should not be None after the check above
+    assert IQ_SERVER_URL is not None
+    assert IQ_USERNAME is not None
+    assert IQ_PASSWORD is not None
 
     print("🔧 IQ Server Application Cleanup Tool")
     print("=" * 50)
 
-    remove_all_applications(
-        org_id=ORGANIZATION_ID,
-        iq_url=IQ_SERVER_URL,
-        iq_username=IQ_USERNAME,
-        iq_password=IQ_PASSWORD,
-    )
+    try:
+        # Load organization configurations
+        org_configs = load_org_configs()
+
+        overall_stats = {"deleted": 0, "failed": 0}
+
+        print(f"Processing {len(org_configs)} organizations")
+        print("=" * 50)
+
+        for org_config in org_configs:
+            org_id = org_config["id"]
+            # Use chineseName as org_name for display
+            org_name = org_config["chineseName"]
+
+            stats = remove_all_applications(
+                org_id=org_id,
+                org_name=org_name,
+                iq_url=IQ_SERVER_URL,
+                iq_username=IQ_USERNAME,
+                iq_password=IQ_PASSWORD,
+            )
+
+            # Accumulate overall statistics
+            overall_stats["deleted"] += stats["deleted"]
+            overall_stats["failed"] += stats["failed"]
+
+        # Final summary
+        print("=" * 50)
+        print("OVERALL CLEANUP SUMMARY")
+        print("=" * 20)
+        print(f"Total applications deleted: {overall_stats['deleted']}")
+        print(f"Total deletion failures: {overall_stats['failed']}")
+        print("Multi-organization cleanup completed!")
+
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}")
 
 
 if __name__ == "__main__":

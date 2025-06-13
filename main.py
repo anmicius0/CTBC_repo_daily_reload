@@ -1,220 +1,160 @@
 #!/usr/bin/env python3
-"""GitHub to Sonatype IQ Server Repository Sync Tool"""
 
-import requests
-import os
-import sys
+import os, sys, json, requests
 from github import Github
 from dotenv import load_dotenv
-from typing import Dict, List
 
-load_dotenv()
+base_dir = (
+    os.path.dirname(sys.executable)
+    if getattr(sys, "frozen", False)
+    else os.path.dirname(os.path.abspath(__file__))
+)
+resolve_path = lambda p: p if os.path.isabs(p) else os.path.join(base_dir, p)
+load_dotenv(resolve_path(".env"))
 
-
-def get_config():
-    """Load configuration from environment variables"""
-    config = {
-        "GITHUB_TOKEN": os.getenv("GITHUB_TOKEN"),
-        "IQ_SERVER_URL": os.getenv("IQ_SERVER_URL"),
-        "IQ_USERNAME": os.getenv("IQ_USERNAME"),
-        "IQ_PASSWORD": os.getenv("IQ_PASSWORD"),
-        "ORGANIZATION_ID": os.getenv("ORGANIZATION_ID"),
-        "SEARCH_TERM": os.getenv("REPOSITORY_SEARCH_TERM", "vintage"),
-        "DEFAULT_BRANCH": os.getenv("DEFAULT_BRANCH", "main"),
-        "STAGE_ID": os.getenv("STAGE_ID", "source"),
-    }
-
-    missing = [
-        k
-        for k, v in config.items()
-        if not v
-        and k
-        in [
-            "GITHUB_TOKEN",
-            "IQ_SERVER_URL",
-            "IQ_USERNAME",
-            "IQ_PASSWORD",
-            "ORGANIZATION_ID",
-        ]
+CFG = lambda: {
+    k: os.getenv(k)
+    for k in [
+        "GITHUB_TOKEN",
+        "IQ_SERVER_URL",
+        "IQ_USERNAME",
+        "IQ_PASSWORD",
+        "GITHUB_SEARCH_QUERY",
     ]
-    if missing:
-        raise ValueError(
-            f"Missing required environment variables: {', '.join(missing)}"
-        )
+} | {
+    "DEFAULT_BRANCH": os.getenv("DEFAULT_BRANCH", "main"),
+    "STAGE_ID": os.getenv("STAGE_ID", "source"),
+}
+ORG = lambda: json.load(open(resolve_path("org-github.json")))
 
-    return config
 
+class IQ:
+    def __init__(self, url, u, p):
+        self.b = url.rstrip("/")
+        self.s = requests.Session()
+        self.s.auth = (u, p)
+        self.s.headers.update({"Accept": "application/json"})
 
-class IQServerClient:
-    """Simplified IQ Server API client"""
+    def req(self, m, e, **k):
+        return self.s.request(m, f"{self.b}{e}", **k)
 
-    def __init__(self, base_url: str, username: str, password: str):
-        self.base_url = base_url.rstrip("/")
-        self.session = requests.Session()
-        self.session.auth = (username, password)
-        self.session.headers.update({"Accept": "application/json"})
-
-    def _request(self, method: str, endpoint: str, **kwargs):
-        """Make API request with error handling"""
-        url = f"{self.base_url}{endpoint}"
-        response = self.session.request(method, url, **kwargs)
-        response.raise_for_status()
-        return response
-
-    def get_applications(self, org_id: str) -> Dict[str, str]:
-        """Get existing applications as name->id mapping"""
-        response = self._request("GET", f"/api/v2/applications/organization/{org_id}")
-        apps = response.json()["applications"]
-        return {app["name"]: app["id"] for app in apps}
-
-    def create_app_with_scm(
-        self, repo_name: str, repo_url: str, branch: str, org_id: str
-    ) -> str:
-        """Create application and add SCM connection in one step"""
-        # Create application
-        app_data = {
-            "publicId": repo_name.lower().replace(" ", "-"),
-            "name": repo_name,
-            "organizationId": org_id,
+    def apps(self, oid):
+        return {
+            a["name"]: a["id"]
+            for a in self.req("GET", f"/api/v2/applications/organization/{oid}").json()[
+                "applications"
+            ]
         }
-        response = self._request("POST", "/api/v2/applications", json=app_data)
-        app_id = response.json()["id"]
 
-        # Add SCM connection
-        scm_data = {
-            "repositoryUrl": repo_url,
-            "baseBranch": branch,
-            "remediationPullRequestsEnabled": True,
-            "pullRequestCommentingEnabled": True,
-            "sourceControlEvaluationsEnabled": True,
-        }
-        self._request(
-            "POST", f"/api/v2/sourceControl/application/{app_id}", json=scm_data
-        )
-
-        return app_id
-
-    def trigger_scan(self, app_id: str, branch: str, stage_id: str) -> None:
-        """Trigger source control evaluation"""
-        scan_data = {"stageId": stage_id, "branchName": branch}
-        self._request(
+    def create(self, n, url, br, oid):
+        a = self.req(
             "POST",
-            f"/api/v2/evaluation/applications/{app_id}/sourceControlEvaluation",
-            json=scan_data,
+            "/api/v2/applications",
+            json={
+                "publicId": n.lower().replace(" ", "-"),
+                "name": n,
+                "organizationId": oid,
+            },
+        ).json()["id"]
+        self.req(
+            "POST",
+            f"/api/v2/sourceControl/application/{a}",
+            json={
+                "repositoryUrl": url,
+                "baseBranch": br,
+                "remediationPullRequestsEnabled": True,
+                "pullRequestCommentingEnabled": True,
+                "sourceControlEvaluationsEnabled": True,
+            },
+        )
+        return a
+
+    def scan(self, aid, br, stg):
+        self.req(
+            "POST",
+            f"/api/v2/evaluation/applications/{aid}/sourceControlEvaluation",
+            json={"stageId": stg, "branchName": br},
         )
 
 
-class GitHubRepoSync:
-    """Main synchronization class"""
+class Sync:
+    def __init__(self, c):
+        self.c = c
+        self.gh = Github(c["GITHUB_TOKEN"])
+        self.iq = IQ(c["IQ_SERVER_URL"], c["IQ_USERNAME"], c["IQ_PASSWORD"])
 
-    def __init__(self, config: Dict[str, str]):
-        self.config = config
-        self.github = Github(config["GITHUB_TOKEN"])
-        self.iq_client = IQServerClient(
-            config["IQ_SERVER_URL"], config["IQ_USERNAME"], config["IQ_PASSWORD"]
+    def repos(self, kw):
+        user = self.gh.get_user()
+        query_template = (
+            self.c.get("GITHUB_SEARCH_QUERY")
+            or '"權責部門：{kw}" in:description user:{user}'
         )
+        q = query_template.format(kw=kw, user=user.login)
+        return [
+            {
+                "name": r.name,
+                "clone_url": r.clone_url,
+                "default_branch": r.default_branch or self.c["DEFAULT_BRANCH"],
+            }
+            for r in self.gh.search_repositories(query=q)
+        ]
 
-    def get_repositories(self) -> List[Dict[str, str]]:
-        """Get GitHub repositories matching search term"""
-        print("Searching GitHub repositories...")
-        user = self.github.get_user()
-        search_results = self.github.search_repositories(
-            query=f"{self.config['SEARCH_TERM']} in:name user:{user.login}"
-        )
-
-        repos = []
-        for repo in search_results:
-            repos.append(
-                {
-                    "name": repo.name,
-                    "clone_url": repo.clone_url,
-                    "default_branch": repo.default_branch
-                    or self.config["DEFAULT_BRANCH"],
-                }
-            )
-
-        print(
-            f"Found {len(repos)} repositories matching '{self.config['SEARCH_TERM']}'"
-        )
-        if repos:
-            print("Repositories found:")
-            for repo in repos:
-                print(f"  • {repo['name']} ({repo['default_branch']})")
-        return repos
-
-    def sync(self) -> Dict[str, int]:
-        """Main sync function"""
-        print("GitHub to IQ Server Sync Tool")
-        print("=" * 40)
-        print("Starting repository synchronization...")
-
-        # Get repositories
-        repos = self.get_repositories()
-        if not repos:
-            print(f"No repositories found matching '{self.config['SEARCH_TERM']}'")
-            return {"created": 0, "scanned": 0, "errors": 0}
-
-        # Get existing applications
-        print("Checking existing IQ Server applications...")
-        existing_apps = self.iq_client.get_applications(self.config["ORGANIZATION_ID"])
-        print(f"Found {len(existing_apps)} existing applications in IQ Server")
-
-        # Process repositories
-        created = scanned = errors = 0
+    def sync(self, oid, kw):
+        print(f"\n=== 🏢 Syncing organization: {kw} (ID: {oid}) ===")
+        repos = self.repos(kw)
+        apps = self.iq.apps(oid)
+        cr = sc = er = 0
         total = len(repos)
-        print(f"Processing {total} repositories:")
-
-        for i, repo in enumerate(repos, 1):
-            repo_name = repo["name"]
+        if not repos:
+            print(f"⚠️  No repositories found for '{kw}'")
+            return {"created": 0, "scanned": 0, "errors": 0}
+        for i, r in enumerate(repos, 1):
             try:
-                # Create app if it doesn't exist
-                if repo_name not in existing_apps:
-                    app_id = self.iq_client.create_app_with_scm(
-                        repo_name,
-                        repo["clone_url"],
-                        repo["default_branch"],
-                        self.config["ORGANIZATION_ID"],
-                    )
-                    print(f"✅ [{i}/{total}] Created & connected: {repo_name}")
-                    created += 1
-                else:
-                    app_id = existing_apps[repo_name]
-                    print(f"🔄 [{i}/{total}] Scanning existing: {repo_name}")
-
-                # Trigger scan
-                self.iq_client.trigger_scan(
-                    app_id, repo["default_branch"], self.config["STAGE_ID"]
+                aid = (
+                    self.iq.create(r["name"], r["clone_url"], r["default_branch"], oid)
+                    if r["name"] not in apps
+                    else apps[r["name"]]
                 )
-                scanned += 1
-
+                self.iq.scan(aid, r["default_branch"], self.c["STAGE_ID"])
+                if r["name"] not in apps:
+                    cr += 1
+                    print(f"  🟢 [{i}/{total}] Created & scanned: {r['name']}")
+                else:
+                    print(f"  🔄 [{i}/{total}] Scanned existing: {r['name']}")
+                sc += 1
             except Exception as e:
-                print(f"❌ [{i}/{total}] Failed: {repo_name} - {e}")
-                errors += 1
-
-        # Summary
-        print("\nSync Summary")
-        print("=" * 20)
-        print(f"Applications created: {created}")
-        print(f"Scans triggered: {scanned}")
-        print(f"Errors: {errors}")
-        print("Synchronization completed!")
-
-        return {"created": created, "scanned": scanned, "errors": errors}
+                er += 1
+                print(f"  ❌ [{i}/{total}] {r['name']} - {e}")
+        print(f"--- {kw} summary: 🟢 {cr} created, 🔄 {sc} scanned, ❌ {er} errors ---")
+        return {"created": cr, "scanned": sc, "errors": er}
 
 
 def main():
-    """Main function"""
+    print("\n==============================")
+    print("🚀 GitHub → Sonatype IQ Sync Tool")
+    print("==============================\n")
+    c = CFG()
+    orgs = [o for o in ORG() if o.get("chineseName")]  # Only orgs with chineseName
+    s = Sync(c)
+    total = {k: 0 for k in ["created", "scanned", "errors"]}
+    print(f"Processing {len(orgs)} organizations...\n")
+    for o in orgs:
+        r = s.sync(o["id"], o["chineseName"])
+        for k in total:
+            total[k] += r[k]
+    print("\n==============================")
+    print(
+        f"🏁 OVERALL SUMMARY: 🟢 Created {total['created']} | 🔄 Scanned {total['scanned']} | ❌ Errors {total['errors']}"
+    )
+    print("==============================\n")
+
+
+if __name__ == "__main__":
     try:
-        config = get_config()
-        sync_tool = GitHubRepoSync(config)
-        return sync_tool.sync()
+        main()
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user")
+        print("\nCancelled")
         sys.exit(0)
     except Exception as e:
         print(f"\nSync failed: {e}")
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

@@ -27,6 +27,8 @@ python main.py
 
 ### Required Environment Variables
 
+The tool uses a `.env` file for configuration. You can customize its behavior by editing this file. When running as an executable, make sure the `.env` file is in the same directory as the executable or in your working directory.
+
 ```bash
 GITHUB_TOKEN=your_github_token
 IQ_SERVER_URL=https://your-iq-server.com
@@ -43,6 +45,43 @@ DEFAULT_BRANCH=main               # Default branch name
 STAGE_ID=source                   # IQ scan stage
 ```
 
+## Customization with Executable
+
+When running the tool as an executable (e.g., a frozen binary), you can still customize its behavior using the following files:
+
+### 1. `.env` File
+
+- Place your `.env` file in the same directory as the executable or in your current working directory.
+- Edit the variables to set your GitHub token, IQ Server credentials, default branch, scan stage, and search query.
+- Example:
+
+```bash
+GITHUB_TOKEN=your_github_token
+IQ_SERVER_URL=https://your-iq-server.com
+IQ_USERNAME=your_username
+IQ_PASSWORD=your_password
+DEFAULT_BRANCH=main
+STAGE_ID=source
+GITHUB_SEARCH_QUERY="權責部門：{kw}" in:description user:{user}
+```
+
+### 2. `org-github.json` File
+
+- This file maps organization IDs to their names and (optionally) Chinese names.
+- Place `org-github.json` in the same directory as the executable or working directory.
+- To customize which organizations are processed, edit this file to add, remove, or modify organization entries.
+- Example entry:
+
+```json
+[
+  {
+    "id": "0a4006e9236c4ede89cfec9a25211e02",
+    "name": "Application Service Development Dept",
+    "chineseName": "後勤應用系統部"
+  }
+]
+```
+
 ## Customization
 
 ### Search Criteria
@@ -51,6 +90,12 @@ Modify search term in `.env`:
 
 ```bash
 REPOSITORY_SEARCH_TERM=myproject  # Find repos with "myproject" in name
+```
+
+Or customize the search query using `GITHUB_SEARCH_QUERY` in `.env`:
+
+```bash
+GITHUB_SEARCH_QUERY="權責部門：{kw}" in:description user:{user}
 ```
 
 ### Repository Filtering
